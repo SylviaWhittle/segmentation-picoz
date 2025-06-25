@@ -181,6 +181,7 @@ def train_model(
     output_classes: int,
     augment_zoom_percent: float,
     augment_flip_rotate: bool,
+    augment_vshift: tuple[float, float],
     conv_activation_function: str,
     final_activation_function: str,
     learning_rate: float,
@@ -204,6 +205,7 @@ def train_model(
     logger.info(f"|  Output classes: {output_classes}")
     logger.info(f"|  Augment zoom percentage: {augment_zoom_percent}")
     logger.info(f"|  Augment flip & rotate: {augment_flip_rotate}")
+    logger.info(f"|  Augment vertical shift: {augment_vshift}")
     logger.info(f"|  Conv activation function: {conv_activation_function}")
     logger.info(f"|  Final activation function: {final_activation_function}")
     logger.info(f"|  Learning rate: {learning_rate}")
@@ -260,6 +262,7 @@ def train_model(
         output_classes=output_classes,
         augment_zoom_percent=augment_zoom_percent,
         augment_flip_rotate=augment_flip_rotate,
+        augment_vshift=augment_vshift,
         norm_upper_bound=norm_upper_bound,
         norm_lower_bound=norm_lower_bound,
     )
@@ -273,6 +276,7 @@ def train_model(
         output_classes=output_classes,
         augment_zoom_percent=0,
         augment_flip_rotate=False,
+        augment_vshift=augment_vshift,
         norm_upper_bound=norm_upper_bound,
         norm_lower_bound=norm_lower_bound,
     )
@@ -367,6 +371,7 @@ if __name__ == "__main__":
         epochs=train_params["epochs"],
         augment_zoom_percent=train_params["augment_zoom_percent"],
         augment_flip_rotate=train_params["augment_flip_rotate"],
+        augment_vshift=train_params["augment_vshift"],
         norm_upper_bound=train_params["norm_upper_bound"],
         norm_lower_bound=train_params["norm_lower_bound"],
         validation_split=train_params["validation_split"],
