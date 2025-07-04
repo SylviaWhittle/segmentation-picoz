@@ -20,7 +20,7 @@ train:
   learning_rate: 1e-04
   augment_zoom_percent: 0.2
   augment_flip_rotate: true
-  augment_vshift: [0, 0] # [min, max] vertical shift, eg [-1.0, 3.0] to shift images down by up to 1 or up by up to 3.
+  augment_vshift: [0.1, 0.5] # [min, max] vertical shift, eg [-1.0, 3.0] to shift images down by up to 1 or up by up to 3.
   norm_upper_bound: 5
   norm_lower_bound: -1
   validation_split: 0.2
