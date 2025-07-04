@@ -12,6 +12,8 @@ from sklearn.model_selection import train_test_split
 from dvclive import Live
 from dvclive.keras import DVCLiveCallback
 from ruamel.yaml import YAML
+from scipy import ndimage
+from scipy.ndimage import distance_transform_edt
 
 from unet import unet_model
 
@@ -69,6 +71,85 @@ def zoom_and_shift(
     return zoomed_and_shifted_image, zoomed_and_shifted_ground_truth
 
 
+def create_edge_weight_map(mask: np.ndarray, edge_weight: float = 2.0, edge_width: int = 1) -> np.ndarray:
+    """Create weight map that emphasizes edges of segmented regions.
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        Binary mask where True/1 indicates the segmented region.
+    edge_weight : float
+        Weight multiplier for edge pixels.
+    edge_width : int
+        Width of the edge in pixels.
+
+    Returns
+    -------
+    np.ndarray
+        Weight map with same shape as mask.
+    """
+    mask_bool = mask.astype(bool)
+
+    # Create edge map by dilating and subtracting eroded mask
+    dilated = ndimage.binary_dilation(mask_bool, iterations=edge_width)
+    eroded = ndimage.binary_erosion(mask_bool, iterations=edge_width)
+    edges = dilated & ~eroded
+
+    # Create weight map
+    weight_map = np.ones_like(mask, dtype=np.float32)
+    weight_map[edges] = edge_weight
+
+    return weight_map
+
+
+def create_distance_weight_map(mask: np.ndarray, max_weight: float = 3.0, decay_factor: float = 0.1) -> np.ndarray:
+    """Create weight map based on distance to object boundaries.
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        Binary mask where True/1 indicates the segmented region.
+    max_weight : float
+        Maximum weight value.
+    decay_factor : float
+        Controls how quickly weights decay from boundaries.
+
+    Returns
+    -------
+    np.ndarray
+        Weight map with same shape as mask.
+    """
+    mask_bool = mask.astype(bool)
+
+    # Calculate distance from boundaries (both inside and outside)
+    inside_distances = distance_transform_edt(mask_bool)
+    outside_distances = distance_transform_edt(~mask_bool)
+
+    # Combine distances (minimum distance to any boundary)
+    min_distances = np.minimum(inside_distances, outside_distances)
+
+    # Create exponential decay weight map
+    weight_map = 1.0 + (max_weight - 1.0) * np.exp(-decay_factor * min_distances)
+
+    return weight_map.astype(np.float32)
+
+
+def create_uniform_weight_map(mask: np.ndarray) -> np.ndarray:
+    """Create uniform weight map (all weights = 1.0).
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        Binary mask (used only for shape).
+
+    Returns
+    -------
+    np.ndarray
+        Uniform weight map with same shape as mask.
+    """
+    return np.ones_like(mask, dtype=np.float32)
+
+
 # generator for data
 def image_data_generator(
     data_dir: Path,
@@ -82,13 +163,19 @@ def image_data_generator(
     augment_vshift: tuple[float, float],
     norm_upper_bound: float,
     norm_lower_bound: float,
+    weight_map_strategy: str = "uniform",
+    weight_map_params: dict = None,
 ):
-    """Generate batches of images and ground truth masks."""
+    """Generate batches of images and ground truth masks with optional weight maps."""
 
     if image_channels != 1:
         raise NotImplementedError(
             f"Image channels {image_channels} not implemented. Only 1 channel images are supported."
         )
+
+    # Set default weight map parameters if not provided
+    if weight_map_params is None:
+        weight_map_params = {}
 
     while True:
         # Select files for the batch
@@ -141,12 +228,23 @@ def image_data_generator(
 
             # Add the image and ground truth to the batch
             batch_input.append(image)
+
+            # Create weight map based on the type
+            if weight_map_strategy == "edge":
+                edge_weight = weight_map_params.get("edge_weight", 2.0)
+                edge_width = weight_map_params.get("edge_width", 1)
+                weight_map = create_edge_weight_map(ground_truth, edge_weight, edge_width)
+            elif weight_map_strategy == "distance":
+                max_weight = weight_map_params.get("max_weight", 3.0)
+                decay_factor = weight_map_params.get("decay_factor", 0.1)
+                weight_map = create_distance_weight_map(ground_truth, max_weight, decay_factor)
+            else:  # uniform or any other strategy
+                weight_map = create_uniform_weight_map(ground_truth)
+
             if output_classes > 1:
                 categorical_ground_truth = np.zeros(
                     shape=(model_image_size[0], model_image_size[1], output_classes)
                 ).astype(np.uint8)
-                # print(f"Ground truth shape: {ground_truth.shape}")
-                # print(f"Categorical ground truth shape: {categorical_ground_truth.shape}")
                 logger.info(
                     f"Ground truth unique values: {np.unique(ground_truth)}, counts: {np.bincount(ground_truth.flatten())}"
                 )
@@ -154,11 +252,19 @@ def image_data_generator(
                     # print(i)
                     categorical_ground_truth[:, :, i] = np.uint8(np.where(ground_truth == (i + 1), 1, 0))
                     logger.info(f"categorical classes and counts: {i} : {np.sum(categorical_ground_truth[:, :, i])}")
-                batch_output.append(categorical_ground_truth)
+
+                # Concatenate weight map as an additional channel for categorical case
+                weight_map_expanded = np.expand_dims(weight_map, axis=-1)
+                categorical_with_weights = np.concatenate([categorical_ground_truth, weight_map_expanded], axis=-1)
+                batch_output.append(categorical_with_weights)
             else:
-                # logger.info(f"unique values in ground truth: {np.unique(ground_truth)}")
-                # logger.info(f"Ground truth max value: {np.max(ground_truth)} grabbing value 2 only")
-                batch_output.append(ground_truth.astype(bool))
+                ground_truth_bool = ground_truth.astype(bool)
+
+                # For binary case, concatenate ground truth and weight map
+                ground_truth_expanded = np.expand_dims(ground_truth_bool.astype(np.float32), axis=-1)
+                weight_map_expanded = np.expand_dims(weight_map, axis=-1)
+                binary_with_weights = np.concatenate([ground_truth_expanded, weight_map_expanded], axis=-1)
+                batch_output.append(binary_with_weights)
 
         # Convert the lists to numpy arrays
         batch_x = np.array(batch_input).astype(np.float32)
@@ -191,6 +297,8 @@ def train_model(
     norm_lower_bound: int,
     validation_split: float,
     loss_function: str,
+    weight_map_strategy: str = "uniform",
+    weight_map_params: dict = None,
 ):
     """Train a model to segment images."""
 
@@ -215,6 +323,12 @@ def train_model(
     logger.info(f"|  Normalisation lower bound: {norm_lower_bound}")
     logger.info(f"|  Validation split: {validation_split}")
     logger.info(f"|  Loss function: {loss_function}")
+    logger.info(f"|  Weight map strategy: {weight_map_strategy}")
+    logger.info(f"|  Weight map parameters: {weight_map_params}")
+
+    # Set default weight map parameters if not provided
+    if weight_map_params is None:
+        weight_map_params = {}
 
     # Set the random seed
     np.random.seed(random_seed)
@@ -265,6 +379,8 @@ def train_model(
         augment_vshift=augment_vshift,
         norm_upper_bound=norm_upper_bound,
         norm_lower_bound=norm_lower_bound,
+        weight_map_strategy=weight_map_strategy,
+        weight_map_params=weight_map_params,
     )
 
     validation_generator = image_data_generator(
@@ -279,6 +395,8 @@ def train_model(
         augment_vshift=augment_vshift,
         norm_upper_bound=norm_upper_bound,
         norm_lower_bound=norm_lower_bound,
+        weight_map_strategy=weight_map_strategy,
+        weight_map_params=weight_map_params,
     )
 
     # Load the model
@@ -376,4 +494,6 @@ if __name__ == "__main__":
         norm_lower_bound=train_params["norm_lower_bound"],
         validation_split=train_params["validation_split"],
         loss_function=base_params["loss_function"],
+        weight_map_strategy=train_params.get("weight_map_strategy", "uniform"),
+        weight_map_params=train_params.get("weight_map_params", {}),
     )

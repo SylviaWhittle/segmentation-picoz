@@ -43,6 +43,70 @@ def dice_loss(y_true, y_pred, smooth=1e-5):
     return dice
 
 
+# Weighted DICE Loss
+def weighted_dice_loss(y_true, y_pred, y_weights, smooth=1e-5):
+    """Weighted DICE loss function that emphasizes certain regions.
+
+    Parameters
+    ----------
+    y_true : tf.Tensor
+        True values with shape (batch_size, height, width, channels).
+    y_pred : tf.Tensor
+        Predicted values with shape (batch_size, height, width, channels).
+    y_weights : tf.Tensor
+        Weight map with shape (batch_size, height, width) or (batch_size, height, width, 1).
+        Higher values indicate regions of greater importance.
+    smooth : float
+        Smoothing factor to prevent division by zero.
+
+    Returns
+    -------
+    dice : tf.Tensor
+        The weighted DICE loss.
+    """
+    # Ensure weights have the right shape - expand dims if needed
+    if len(y_weights.shape) == 3:  # (batch_size, height, width)
+        y_weights = tf.expand_dims(y_weights, axis=-1)
+    
+    # Ensure all tensors are float32
+    y_true = tf.cast(y_true, tf.float32)
+    y_pred = tf.cast(y_pred, tf.float32)
+    y_weights = tf.cast(y_weights, tf.float32)
+    
+    # Apply weights to the intersection and union calculations
+    weighted_intersection = tf.reduce_sum(y_weights * y_true * y_pred, axis=(1, 2))
+    weighted_sum_pred = tf.reduce_sum(y_weights * tf.square(y_pred), axis=(1, 2))
+    weighted_sum_true = tf.reduce_sum(y_weights * tf.square(y_true), axis=(1, 2))
+    
+    dice = 1 - (2 * weighted_intersection + smooth) / (weighted_sum_pred + weighted_sum_true + smooth)
+    return dice
+
+
+# Custom Loss Class for Weighted DICE
+class WeightedDiceLoss(tf.keras.losses.Loss):
+    """Custom Keras loss class for weighted DICE loss.
+    
+    This allows you to pass weight maps along with your training data.
+    Use it by concatenating weight maps as an additional channel to y_true.
+    """
+    
+    def __init__(self, smooth=1e-5, name="weighted_dice_loss"):
+        super().__init__(name=name)
+        self.smooth = smooth
+    
+    def call(self, y_true, y_pred):
+        """
+        Expects y_true to have shape (batch_size, height, width, channels + 1)
+        where the last channel contains the weight map.
+        y_pred should have shape (batch_size, height, width, channels).
+        """
+        # Split y_true into actual labels and weights
+        actual_y_true = y_true[..., :-1]  # All channels except last
+        y_weights = y_true[..., -1:]      # Last channel is weights
+        
+        return weighted_dice_loss(actual_y_true, y_pred, y_weights, self.smooth)
+
+
 # IoU Loss
 def iou_loss(y_true, y_pred, smooth=1e-5):
     """Intersection over Union loss function.
@@ -221,6 +285,10 @@ def unet_model(
         # loss = dice_loss
         # loss = tf.keras.losses.Dice(reduction="sum_over_batch_size", name="dice")
         loss = dice_loss
+    elif loss_function == "weighted_dice_loss":
+        # Use the custom WeightedDiceLoss class
+        loss = WeightedDiceLoss()
+        print("Using WeightedDiceLoss - remember to concatenate weight maps to y_true as the last channel")
     elif loss_function == "iou_loss":
         loss = iou_loss
     elif loss_function == "binary_crossentropy":
